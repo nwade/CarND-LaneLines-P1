@@ -25,6 +25,9 @@ HOUGH_MAX_LINE_GAP = 150
 CURR_WEIGHT = 0.6
 PREV_WEIGHT = 1 - CURR_WEIGHT
 
+# from (0..1) - used to throw out consecutive values differing by > this theshold * 100
+SMOOTHING_THRESHOLD = 0.30
+
 # cache of previous frame lines to help with video smoothing
 l_cache = None
 r_cache = None
@@ -90,53 +93,98 @@ def draw_lines(img, lines, color=[255, 0, 0], thickness=10):
     """
     global l_cache, r_cache  # opt-in to using the global cache variables
 
-    l_intercepts = []
-    r_intercepts = []
-    l_slopes = []
-    r_slopes = []
-    y_values = []
+    all_slopes_and_intercepts = np.zeros((len(lines), 2))
+    all_ys = []
 
-    for line in lines:
+    # save all non-infinite (slope, intercept) combos into all_slopes_and_intercepts
+    # also grab all corresponding y values
+    for i, line in enumerate(lines):
         for x1, y1, x2, y2 in line:
-            y_values.append(y1)
-            y_values.append(y2)
             slope = (y2 - y1) / (x2 - x1)
             intercept = y1 - slope * x1
+            if not np.isinf(slope) and not np.isinf(intercept):
+                all_slopes_and_intercepts[i] = [slope, intercept]
+                all_ys.append(y1)
+                all_ys.append(y2)
 
-            # since the y-axis is inverted, lines with positive slope form the right lane line
-            if slope > 0:
-                if not np.isinf(slope):
-                    r_slopes.append(slope)
-                if not np.isinf(intercept):
-                    r_intercepts.append(intercept)
-            else:
-                if not np.isinf(slope):
-                    l_slopes.append(slope)
-                if not np.isinf(intercept):
-                    l_intercepts.append(intercept)
+    # max and min slopes across all lines
+    max_slope = all_slopes_and_intercepts[all_slopes_and_intercepts.argmax(axis=0)[0]][0]
+    min_slope = all_slopes_and_intercepts[all_slopes_and_intercepts.argmin(axis=0)[0]][0]
+    min_y = np.min(all_ys)  # min y value across all lines
 
-    # calculate each lane line, using the previous frame's line if this frame cannot be calculated
-    left_line = l_cache if len(l_slopes) <= 0 else calculate_line(img, l_slopes, l_intercepts, y_values, l_cache)
-    right_line = r_cache if len(r_slopes) <= 0 else calculate_line(img, r_slopes, r_intercepts, y_values, r_cache)
+    # slopes and intercepts for all valid left lines
+    l_ms = []
+    l_bs = []
+    # slopes and intercepts for all valid right lines
+    r_ms = []
+    r_bs = []
 
-    cv2.line(img, (left_line[0], left_line[1]), (left_line[2], left_line[3]), color, thickness)
-    l_cache = left_line
-    cv2.line(img, (right_line[0], right_line[1]), (right_line[2], right_line[3]), color, thickness)
-    r_cache = right_line
+    for [m, b] in all_slopes_and_intercepts:
+        if valid_for_left_line(m, min_slope):
+            l_ms.append(m)
+            l_bs.append(b)
+        elif valid_for_right_line(m, max_slope):
+            r_ms.append(m)
+            r_bs.append(b)
+
+    # calculate each lane line, using the previous frame's cached line if this frame cannot be calculated
+    l_line, r_line = calculate_lines(img, l_ms, r_ms, l_bs, r_bs, min_y, l_cache, r_cache)
+
+    # draw and cache the lines
+    cv2.line(img, (l_line[0], l_line[1]), (l_line[2], l_line[3]), color, thickness)
+    cv2.line(img, (r_line[0], r_line[1]), (r_line[2], r_line[3]), color, thickness)
+    l_cache = l_line
+    r_cache = r_line
 
 
-def calculate_line(img, slopes, intercepts, y_values, cached_line):
-    avg_slope = np.average(slopes)
-    avg_intercept = np.average(intercepts)
-    y1 = int(img.shape[0])
-    x1 = int((y1 - avg_intercept) / avg_slope)
-    y2 = int(np.min(y_values))
-    x2 = int((y2 - avg_intercept) / avg_slope)
+def valid_for_left_line(slope, min_slope):
+    # true if slope is negative and slope is reasonably close to the global minimum slope
+    return slope < 0 and values_are_within_range(slope, min_slope)
 
-    # if we have the previous frame's cached line return a weighted average with the new one
-    # otherwise, just return the current frame's newly calculated line
-    new_line = np.array([x1, y1, x2, y2], dtype='float32')
-    return new_line if cached_line is None else (CURR_WEIGHT * new_line) + (PREV_WEIGHT * cached_line)
+
+def valid_for_right_line(slope, max_slope):
+    # true if slope is positive and slope is reasonably close to the global maximum slope
+    return slope > 0 and values_are_within_range(slope, max_slope)
+
+
+def values_are_within_range(value, max_value):
+    return abs(value - max_value) / max_value <= SMOOTHING_THRESHOLD
+
+
+def calculate_lines(img, l_slopes, r_slopes, l_intercepts, r_intercepts, min_y, left_cache, right_cache):
+    # if we have the previous frame's cached lines return a weighted average with the new ones
+    # otherwise, just return the current frame's newly calculated lines
+    l_avg_slope = np.average(l_slopes)
+    l_avg_intercept = np.average(l_intercepts)
+    l_y1 = int(img.shape[0])
+    l_x1 = int((l_y1 - l_avg_intercept) / l_avg_slope)
+    l_y2 = int(min_y)
+    l_x2 = int((l_y2 - l_avg_intercept) / l_avg_slope)
+
+    l_new_line = np.array([l_x1, l_y1, l_x2, l_y2], dtype='float32')
+    l_new_line = l_new_line if left_cache is None else (CURR_WEIGHT * l_new_line) + (PREV_WEIGHT * left_cache)
+
+    r_avg_slope = np.average(r_slopes)
+    r_avg_intercept = np.average(r_intercepts)
+    r_y1 = int(img.shape[0])
+    r_x1 = int((r_y1 - r_avg_intercept) / r_avg_slope)
+    r_y2 = int(min_y)
+    r_x2 = int((r_y2 - r_avg_intercept) / r_avg_slope)
+
+    r_new_line = np.array([r_x1, r_y1, r_x2, r_y2], dtype='float32')
+    r_new_line = r_new_line if right_cache is None else (CURR_WEIGHT * r_new_line) + (PREV_WEIGHT * right_cache)
+
+    # prevent lines from crossing
+    if r_x2 < l_x2:
+        avg_x = (r_x2 + l_x2) / 2
+        new_l_y2 = l_avg_slope * avg_x + l_avg_intercept
+        new_r_y2 = r_avg_slope * avg_x + r_avg_intercept
+        l_new_line[2] = avg_x
+        r_new_line[2] = avg_x
+        l_new_line[3] = new_l_y2
+        r_new_line[3] = new_r_y2
+
+    return l_new_line, r_new_line
 
 
 def hough_lines(img, rho, theta, threshold, min_line_len, max_line_gap):
@@ -205,14 +253,15 @@ def process_image(image):
 
 
 def video_stuff():
-    clip1 = VideoFileClip("test_videos/solidWhiteRight.mp4")
+    clip1 = VideoFileClip("test_videos/solidYellowLeft.mp4")
+    # clip1 = VideoFileClip("test_videos/solidWhiteRight.mp4")
     white_clip = clip1.fl_image(process_image)
-    white_clip.write_videofile('test_videos_output/solidWhiteRight.mp4', audio=False)
+    white_clip.write_videofile('test_videos_output/solidYellowLeft.mp4', audio=False)
 
 
 def run_pipeline():
     """
-    Applies the lane detection pipeline and saves final images
+    Applie  s the lane detection pipeline and saves final images
     This is the main function for running against the images
     """
     for file_name in os.listdir(INPUT_DIR):

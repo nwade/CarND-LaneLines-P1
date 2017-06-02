@@ -1,7 +1,13 @@
-#**Finding Lane Lines on the Road** 
+#**Finding Lane Lines on the Road**
 [![Udacity - Self-Driving Car NanoDegree](https://s3.amazonaws.com/udacity-sdc/github/shield-carnd.svg)](http://www.udacity.com/drive)
 
 <img src="examples/laneLines_thirdPass.jpg" width="480" alt="Combined Image" />
+
+Implementation Notes
+---
+This forked repository also contains my solution. Output images can be found in `test_images_output/` and output videos in `test_videos_output/`
+
+A simple writeup can be found in `writeup.md`
 
 Overview
 ---
